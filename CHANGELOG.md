@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- 移除底部“模型范围: N 项”状态提示，模型筛选和提示词联动逻辑保持不变。
+
 ## 1.1.0
 
 - 合并 `omp-model-allowlist` 和 `omp-model-append-system`，保留两条原有命令及配置格式。

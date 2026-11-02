@@ -1,6 +1,6 @@
 {
   "name": "omp-model-toolkit",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "oh-my-pi model allowlist and per-enabled-model APPEND_SYSTEM.md bindings",
   "type": "module",
   "license": "MIT",

@@ -5,9 +5,8 @@ import { availableModels as available, enabledPatterns as patterns, enabledModel
 import { AllowedModelPicker, SAVE, ALL, NONE, EMPTY_WARNING } from "./picker";
 
 export default function modelAllowlist(pi: ExtensionAPI) {
-  function status(ctx: ExtensionContext) {
-    const count = patterns(ctx).length;
-    ctx.ui.setStatus("model-allowlist", count ? `模型范围: ${count} 项` : undefined);
+  function clearStatus(ctx: ExtensionContext) {
+    ctx.ui.setStatus("model-allowlist", undefined);
   }
 
   async function save(keys: string[], ctx: ExtensionCommandContext) {
@@ -16,7 +15,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
     const unique = [...new Set(keys)];
     cfgEnabledModels.set(settings, unique);
     await settings.flush();
-    status(ctx);
+    clearStatus(ctx);
     const origin = settings.getProvenance(cfgEnabledModels);
     if (origin !== "global" && origin !== "default") {
       ctx.ui.notify(`全局配置已保存，但当前 ${origin} 层的 enabledModels 优先级更高；请修改该层或移除其覆盖。`, "warning");
@@ -81,7 +80,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
     }
   }
 
-  pi.on("session_start", (_event, ctx) => status(ctx));
+  pi.on("session_start", (_event, ctx) => clearStatus(ctx));
   pi.registerCommand("allowed-models", {
     description: "勾选允许使用的对话模型；list / use / set / reset",
     handler: async (args, ctx) => {
