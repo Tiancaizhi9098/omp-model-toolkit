@@ -4,8 +4,9 @@ import { findScopedSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { patchPayload, replaceSystem } from "./prompt";
 import { absolutePath, atomicWrite, bind, configPath, defaultPromptPath, parseArgs, readBindings, readPrompt, resolvePrompt } from "./storage";
 import { enabledModels, isEnabledModel, modelKey, requireEnabledModel } from "./model-scope";
+import type { GatewaySync } from "./gateway-sync";
 
-export default function modelAppendSystem(pi: ExtensionAPI) {
+export default function modelAppendSystem(pi: ExtensionAPI, gateways: GatewaySync) {
   const agentDir = (ctx: ExtensionContext) => findScopedSettings(ctx.cwd)?.getAgentDir() ?? pi.pi.getAgentDir();
   // State belongs to this factory/session; child sessions must not share prompt state.
   let preparedKey: string | undefined;
@@ -84,6 +85,7 @@ export default function modelAppendSystem(pi: ExtensionAPI) {
     description: "仅为已启用模型绑定/编辑 APPEND_SYSTEM.md；bind / edit / show / unbind / list",
     handler: async (args, ctx) => {
       try {
+        await gateways.sync(ctx);
         const [action = "", specified, ...rest] = parseArgs(args);
         if (action === "list") {
           const bindings = readBindings(agentDir(ctx)).bindings;

@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendBlock, patchPayload, replaceSystem } from "../src/prompt";
@@ -105,6 +106,8 @@ describe("system prompt replacement", () => {
 // Real installed OMP loader, event runner, settings, and model matcher; no model inference.
 describe("oh-my-pi 18.15 host integration", () => {
   let host: Awaited<ReturnType<typeof importHost>>;
+  const runners: Array<{ clearManagedTimers(): void }> = [];
+  afterEach(() => { for (const runner of runners.splice(0)) runner.clearManagedTimers(); });
   beforeAll(async () => { host = await importHost(); }, 30_000);
   async function importHost() {
     const spec = (pkg: string, subpath: string) => process.env.OMP_TEST_HOST_MODULES
@@ -120,20 +123,23 @@ describe("oh-my-pi 18.15 host integration", () => {
       ...await import(spec("pi-utils", "index")),
     };
   }
-  async function harness() {
-    const dir = scratch();
+  async function harness(options: { dir?: string; scope?: any; models?: any[]; subagent?: boolean } = {}) {
+    const dir = options.dir ?? scratch();
     host.setAgentDir(dir);
     const loaded = await host.loadExtensions([resolve(import.meta.dir, "../src/index.ts")], dir);
     expect(loaded.errors).toEqual([]);
     expect(loaded.extensions).toHaveLength(1);
-    const scope = host.Settings.isolated();
+    const scope = options.scope ?? host.Settings.isolated();
     const a = { ...host.getBundledModel("openai", "gpt-4.1"), provider: "test", id: "a", name: "Test A" };
     const b = { ...a, id: "b", name: "Test B" };
-    let current = a, aborts = 0;
+    let current = a, aborts = 0, idle = true, pending = false;
     const notices: string[] = [], errors: unknown[] = [], picks: (string | undefined)[] = [];
     const menus: string[][] = [], inputs: string[] = [], renders: string[] = [];
-    const registry = { getAvailable: () => [a, b], getAll: () => [a, b] };
-    const runner = new host.ExtensionRunner(loaded.extensions, loaded.runtime, dir, host.SessionManager.inMemory(dir), registry as never, undefined, scope);
+    const models = options.models ?? [a, b];
+    const registry = { getAvailable: () => [...models], getAll: () => [...models], isBackgroundRefreshPending: () => pending };
+    const runner = new host.ExtensionRunner(loaded.extensions, loaded.runtime, dir, host.SessionManager.inMemory(dir), registry as never, undefined, scope,
+      undefined, undefined, options.subagent ? { kind: "sub", id: "child", name: "child", depth: 1, parentId: "main" } : undefined);
+    runners.push(runner);
     const ui = {
       ...runner.createContext().ui,
       select: async (_title: string, options: string[]) => { menus.push(options); return picks.shift(); },
@@ -153,11 +159,13 @@ describe("oh-my-pi 18.15 host integration", () => {
       setModel: async m => { current = m as typeof a; return true; }, getThinkingLevel: () => undefined,
       setThinkingLevel: () => {}, getSessionName: () => undefined, setSessionName: async () => {},
     }, {
-      getModel: () => current as never, isIdle: () => true, abort: () => { aborts++; }, hasPendingMessages: () => false,
+      getModel: () => current as never, isIdle: () => idle, abort: () => { aborts++; }, hasPendingMessages: () => false,
       shutdown: () => {}, getContextUsage: () => undefined, compact: async () => {}, getSystemPrompt: () => ["base"],
     }, undefined, ui, "tui");
     const command = (name: string, args: string) => runner.runScoped(() => runner.getCommand(name)!.handler(args, runner.createCommandContext()));
-    return { dir, runner, scope, a, b, notices, errors, picks, menus, inputs, renders, command, current: () => current, aborts: () => aborts };
+    return { dir, runner, scope, a, b, models, ui, notices, errors, picks, menus, inputs, renders, command,
+      setIdle: (value: boolean) => { idle = value; }, setPending: (value: boolean) => { pending = value; },
+      current: () => current, aborts: () => aborts };
   }
   test("actual extension loader registers both commands", async () => {
     const h = await harness();
@@ -273,6 +281,249 @@ describe("oh-my-pi 18.15 host integration", () => {
     await h.command("allowed-models", "reset");
     await h.command("model-prompts", "");
     expect(h.menus.at(-1)).toEqual(["★ test/a", "test/b"]);
+  });
+
+  test("a new gateway is appended once and is immediately offered for prompt binding", async () => {
+    const h = await harness();
+    host.cfgEnabledModels.set(h.scope, ["test/a", "offline/kept"]);
+    await h.command("allowed-models", "list"); // First upgrade records existing providers.
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "offline/kept"]);
+    h.models.push({ ...h.a, provider: "new-gateway" }, { ...h.b, provider: "new-gateway" });
+    await h.command("model-prompts", "");
+    expect(h.menus.at(-1)).toEqual(["new-gateway/a", "new-gateway/b", "★ test/a"]);
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "offline/kept", "new-gateway/a", "new-gateway/b"]);
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(h.scope)).toHaveLength(4);
+    expect(readBindings(h.dir).bindings).toEqual({});
+  });
+
+  test("deselection survives catalog disappearance, plugin reload, and new models on a known gateway", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    const added = { ...h.a, provider: "new-gateway" };
+    h.models.push(added);
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "new-gateway/a"]);
+    await h.command("allowed-models", "set test/a");
+    h.models.pop();
+    await h.command("allowed-models", "list");
+    const restarted = await harness({ dir: h.dir, scope: h.scope, models: [...h.models, added, { ...h.b, provider: "new-gateway" }] });
+    await restarted.command("model-prompts", "");
+    expect(restarted.menus.at(-1)).toEqual(["★ test/a"]);
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+  });
+
+  test("first upgrade and all-models mode never re-enable old exclusions or introduce a restriction", async () => {
+    const h = await harness();
+    h.models.push({ ...h.b, provider: "old-excluded" });
+    host.cfgEnabledModels.set(h.scope, ["test/a"]);
+    await h.command("model-prompts", "");
+    expect(h.menus.at(-1)).toEqual(["★ test/a"]);
+    await h.command("allowed-models", "reset");
+    h.models.push({ ...h.a, provider: "later" });
+    await h.command("model-prompts", "");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual([]);
+    expect(h.menus.at(-1)).toContain("later/a");
+  });
+
+  test("automatic global additions respect runtime overrides and preserve path-scoped global arrays", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    host.cfgEnabledModels.override(h.scope, ["test/b"]);
+    h.models.push({ ...h.a, provider: "new-gateway" });
+    await h.command("model-prompts", "");
+    expect(h.menus.at(-1)).toEqual(["test/b"]);
+    expect(h.scope.getGlobalSettings().enabledModels).toEqual(["test/a", "new-gateway/a"]);
+    const conditional = ["test/a", { path: "/special/**", models: ["test/b"] }];
+    h.scope.writeValue(host.cfgEnabledModels, conditional, "global");
+    h.models.push({ ...h.a, provider: "another" });
+    await h.command("allowed-models", "list");
+    expect(h.scope.getGlobalSettings().enabledModels).toEqual(conditional);
+  });
+
+  test("concurrent discovery and manual saves keep the final explicit deselection", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    h.models.push({ ...h.b, provider: "new-gateway" });
+    await Promise.all([h.command("model-prompts", "list"), h.command("allowed-models", "list")]);
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "new-gateway/b"]);
+    await Promise.all([h.command("allowed-models", "set test/a"), h.command("model-prompts", "list")]);
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+    expect(h.errors).toEqual([]);
+  });
+
+  test("a stale open picker cannot overwrite an automatically added gateway", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    h.ui.custom = async () => {
+      h.models.push({ ...h.a, provider: "new-gateway" });
+      await h.command("model-prompts", "list");
+      return ["test/b"];
+    };
+    await h.command("allowed-models", "");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "new-gateway/a"]);
+    expect(h.notices.at(-1)).toContain("重新打开");
+  });
+
+  test("invalid discovery state is reported without overwriting it or the model selection", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    const file = join(h.dir, "model-toolkit-state.json");
+    writeFileSync(file, '{"version":999}');
+    h.models.push({ ...h.a, provider: "new-gateway" });
+    await h.command("allowed-models", "set test/b");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+    expect(readFileSync(file, "utf8")).toBe('{"version":999}');
+    expect(h.notices.at(-1)).toContain("网关记录");
+  });
+
+  const until = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 4500;
+    while (!predicate() && Date.now() < deadline) await Bun.sleep(25);
+    expect(predicate()).toBe(true);
+  };
+
+  test("session start discovers new gateways without opening either plugin command", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    h.models.push({ ...h.a, provider: "startup-gateway" });
+    await h.runner.emit({ type: "session_start" });
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "startup-gateway/a"]);
+    expect(h.errors).toEqual([]);
+  });
+
+  test("idle polling waits for busy turns and catalog refreshes, then stops on shutdown", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    await h.runner.emit({ type: "session_start" });
+    h.setIdle(false);
+    h.models.push({ ...h.a, provider: "live-gateway" });
+    await Bun.sleep(2200);
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+    h.setPending(true); h.setIdle(true);
+    await h.command("model-prompts", "list");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+    h.models.push({ ...h.b, provider: "live-gateway" });
+    h.setPending(false);
+    await until(() => host.cfgEnabledModels.get(h.scope).length === 3);
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "live-gateway/a", "live-gateway/b"]);
+    await h.runner.emit({ type: "session_shutdown" });
+    h.models.push({ ...h.a, provider: "after-shutdown" });
+    await Bun.sleep(2200);
+    expect(host.cfgEnabledModels.get(h.scope)).toHaveLength(3);
+    expect(h.errors).toEqual([]);
+  }, 12_000);
+
+  test("polling captures the owning profile instead of another session's ambient settings", async () => {
+    const one = await harness();
+    await one.command("allowed-models", "set test/a");
+    await one.runner.emit({ type: "session_start" });
+    const two = await harness();
+    await two.command("allowed-models", "set test/b");
+    await two.runner.emit({ type: "session_start" });
+    one.models.push({ ...one.a, provider: "one-only" });
+    await until(() => host.cfgEnabledModels.get(one.scope).length === 2);
+    expect(host.cfgEnabledModels.get(one.scope)).toEqual(["test/a", "one-only/a"]);
+    expect(host.cfgEnabledModels.get(two.scope)).toEqual(["test/b"]);
+    expect(one.errors).toEqual([]); expect(two.errors).toEqual([]);
+  }, 7000);
+
+  test("subagents never expand the parent's model scope", async () => {
+    const parent = await harness();
+    await parent.command("allowed-models", "set test/a");
+    const child = await harness({ dir: parent.dir, scope: parent.scope, subagent: true,
+      models: [...parent.models, { ...parent.a, provider: "child-only" }] });
+    await child.runner.emit({ type: "session_start" });
+    await child.command("model-prompts", "list");
+    expect(host.cfgEnabledModels.get(parent.scope)).toEqual(["test/a"]);
+    const state = JSON.parse(readFileSync(join(parent.dir, "model-toolkit-state.json"), "utf8"));
+    expect(state.knownProviders).toEqual(["test"]);
+  });
+
+  test("a stale persisted session merges new gateways into the latest saved selection", async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "config.yml"), 'enabledModels:\n  - test/a\n');
+    const first = await host.Settings.loadIsolated({ cwd: dir, agentDir: dir });
+    const second = await host.Settings.loadIsolated({ cwd: dir, agentDir: dir });
+    const one = await harness({ dir, scope: first });
+    const two = await harness({ dir, scope: second, models: one.models });
+    await one.command("allowed-models", "set test/b");
+    expect(host.cfgEnabledModels.get(second)).toEqual(["test/a"]); // A genuinely stale settings instance.
+    one.models.push({ ...one.a, provider: "late-gateway" });
+    await two.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(second)).toEqual(["test/b", "late-gateway/a"]);
+    const saved = Bun.YAML.parse(readFileSync(join(dir, "config.yml"), "utf8")) as any;
+    expect(saved.enabledModels).toEqual(["test/b", "late-gateway/a"]);
+    await one.command("allowed-models", "set test/b");
+    await two.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(second)).toEqual(["test/b"]);
+  });
+
+  test.skipIf(process.platform !== "win32")("a denied gateway-state rename leaves the persisted selection untouched", async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "config.yml"), 'enabledModels:\n  - test/a\n');
+    const settings = await host.Settings.loadIsolated({ cwd: dir, agentDir: dir });
+    const h = await harness({ dir, scope: settings });
+    await h.command("allowed-models", "list");
+    h.models.push({ ...h.a, provider: "new-gateway" });
+    const file = join(dir, "model-toolkit-state.json");
+    expect(spawnSync("attrib", ["+R", file], { windowsHide: true }).status).toBe(0);
+    try {
+      await h.command("allowed-models", "list");
+      expect(h.notices.at(-1)).toContain("EPERM");
+      expect(host.cfgEnabledModels.get(settings)).toEqual(["test/a"]);
+      const saved = Bun.YAML.parse(readFileSync(join(dir, "config.yml"), "utf8")) as any;
+      expect(saved.enabledModels).toEqual(["test/a"]);
+    } finally { spawnSync("attrib", ["-R", file], { windowsHide: true }); }
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(settings)).toEqual(["test/a", "new-gateway/a"]);
+    await h.command("allowed-models", "set test/a");
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(settings)).toEqual(["test/a"]);
+  });
+
+  test("a failed settings flush never leaves a discovered gateway eligible to restore later deselections", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "set test/a");
+    h.models.push({ ...h.a, provider: "new-gateway" });
+    const originalFlush = h.scope.flush.bind(h.scope);
+    // Simulate failure at the persistence boundary; settings, discovery, state and commands remain real.
+    h.scope.flush = async () => { throw new Error("fixture: disk full"); };
+    try {
+      await h.command("allowed-models", "list");
+      expect(h.notices.at(-1)).toContain("disk full");
+      const state = JSON.parse(readFileSync(join(h.dir, "model-toolkit-state.json"), "utf8"));
+      expect(state.knownProviders).toContain("new-gateway");
+    } finally { h.scope.flush = originalFlush; }
+    host.cfgEnabledModels.set(h.scope, ["test/a"]); // A later native/manual choice has final say.
+    await h.scope.flush();
+    await h.command("allowed-models", "list");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a"]);
+  });
+
+  test("a stale all-models picker cannot exclude a gateway it never displayed", async () => {
+    const h = await harness();
+    await h.command("allowed-models", "reset");
+    h.ui.custom = async () => {
+      h.models.push({ ...h.a, provider: "new-gateway" });
+      await h.command("model-prompts", "list");
+      return ["test/a"];
+    };
+    await h.command("allowed-models", "");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual([]);
+    expect(h.notices.at(-1)).toContain("重新打开");
+  });
+
+  test("first-upgrade baseline remembers unavailable providers from existing qualified selectors", async () => {
+    const h = await harness();
+    host.cfgEnabledModels.set(h.scope, ["test/a", "offline/a", "sleeping/b*"]);
+    await h.command("allowed-models", "list");
+    h.models.push({ ...h.a, provider: "offline" }, { ...h.b, provider: "offline" },
+      { ...h.a, provider: "sleeping" }, { ...h.b, provider: "sleeping" });
+    await h.command("model-prompts", "");
+    expect(host.cfgEnabledModels.get(h.scope)).toEqual(["test/a", "offline/a", "sleeping/b*"]);
+    expect(h.menus.at(-1)).toEqual(["offline/a", "sleeping/b", "★ test/a"]);
   });
 });
 

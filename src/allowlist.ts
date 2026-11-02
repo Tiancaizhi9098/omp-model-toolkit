@@ -3,18 +3,18 @@ import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-setting
 import { filterAvailableModelsByEnabledPatterns } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { availableModels as available, enabledPatterns as patterns, enabledModels as allowed, modelKey, scope } from "./model-scope";
 import { AllowedModelPicker, SAVE, ALL, NONE, EMPTY_WARNING } from "./picker";
+import { type GatewaySync, selectionSnapshot } from "./gateway-sync";
 
-export default function modelAllowlist(pi: ExtensionAPI) {
+export default function modelAllowlist(pi: ExtensionAPI, gateways: GatewaySync) {
   function clearStatus(ctx: ExtensionContext) {
     ctx.ui.setStatus("model-allowlist", undefined);
   }
 
-  async function save(keys: string[], ctx: ExtensionCommandContext) {
+  async function save(keys: string[], ctx: ExtensionCommandContext, snapshot?: string) {
     if (!ctx.isIdle()) throw new Error("请等当前回答结束后再修改模型范围。");
     const settings = scope(ctx);
     const unique = [...new Set(keys)];
-    cfgEnabledModels.set(settings, unique);
-    await settings.flush();
+    await gateways.save(unique, ctx, snapshot);
     clearStatus(ctx);
     const origin = settings.getProvenance(cfgEnabledModels);
     if (origin !== "global" && origin !== "default") {
@@ -28,7 +28,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
         ctx.ui.notify("白名单已保存，但当前模型切换失败。请用 /allowed-models use 选择。", "warning");
       }
     }
-    ctx.ui.notify(unique.length ? `已保存 ${unique.length} 个模型，/model-prompts 已同步。重启 omp 后启动模型和 Ctrl+P 轮换范围完整生效。` : "已恢复全部可用对话模型，/model-prompts 已同步；重启 omp 后轮换范围完整生效。", "info");
+    ctx.ui.notify(unique.length ? `已保存 ${unique.length} 个模型，/model-prompts 已同步。` : "已恢复全部可用对话模型，/model-prompts 已同步。", "info");
   }
 
   async function picker(ctx: ExtensionCommandContext) {
@@ -37,6 +37,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
     const models = available(ctx);
     if (!models.length) throw new Error("没有已配置认证的可用对话模型，请先配置 provider。");
     const previous = patterns(ctx);
+    const snapshot = selectionSnapshot(ctx);
     const keys = new Set(allowed(ctx).map(modelKey));
     // Keep unresolved selectors visible instead of silently deleting offline models.
     const unresolved = previous.filter(p => !filterAvailableModelsByEnabledPatterns(models, [p], scope(ctx)).length);
@@ -51,7 +52,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
           cursor: theme.fg("accent", "› "),
           hint: text => theme.fg("dim", text),
         }, done, () => tui.requestRender(), ctx.model ? modelKey(ctx.model) : undefined));
-      if (result !== undefined) await save(result, ctx);
+      if (result !== undefined) await save(result, ctx, snapshot);
       return;
     }
     // Non-terminal UI cannot render custom TUI components. Retain its row via initialIndex.
@@ -69,7 +70,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
           ctx.ui.notify(EMPTY_WARNING, "warning");
           continue;
         }
-        await save([...keys], ctx);
+        await save([...keys], ctx, snapshot);
         return;
       }
       const index = rows.indexOf(chosen);
@@ -85,6 +86,7 @@ export default function modelAllowlist(pi: ExtensionAPI) {
     description: "勾选允许使用的对话模型；list / use / set / reset",
     handler: async (args, ctx) => {
       try {
+        await gateways.sync(ctx);
         const [action = "", ...rest] = args.trim().split(/\s+/);
         if (!action) return await picker(ctx);
         if (action === "list") {

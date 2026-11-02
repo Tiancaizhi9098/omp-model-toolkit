@@ -6,6 +6,8 @@ coverage/
 .omp/
 .pi/
 model-append-system.json
+model-toolkit-state.json
+model-toolkit-state.json.lock
 model-prompts/
 APPEND_SYSTEM.md
 *.log
