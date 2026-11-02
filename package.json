@@ -1,0 +1,26 @@
+{
+  "name": "omp-model-toolkit",
+  "version": "1.1.0",
+  "description": "oh-my-pi model allowlist and per-enabled-model APPEND_SYSTEM.md bindings",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Tiancaizhi9098/omp-model-toolkit.git" },
+  "keywords": ["oh-my-pi", "omp", "omp-plugin", "models", "system-prompt"],
+  "files": ["src", "README.md", "CHANGELOG.md", "LICENSE", "Install.ps1"],
+  "omp": { "extensions": ["./src/index.ts"] },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=18.15.0 <19",
+    "@oh-my-pi/pi-tui": ">=18.15.0 <19"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": { "optional": true },
+    "@oh-my-pi/pi-tui": { "optional": true }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.15.0",
+    "@oh-my-pi/pi-tui": "18.15.0",
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  },
+  "scripts": { "test": "bun test tests", "check": "tsc --noEmit" }
+}

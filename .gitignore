@@ -1,0 +1,12 @@
+node_modules/
+work/
+coverage/
+.env
+.env.*
+.omp/
+.pi/
+model-append-system.json
+model-prompts/
+APPEND_SYSTEM.md
+*.log
+*.tmp

@@ -1,0 +1,13 @@
+# Changelog
+
+## 1.1.0
+
+- 合并 `omp-model-allowlist` 和 `omp-model-append-system`，保留两条原有命令及配置格式。
+- 修复勾选模型后光标跳回第一行，保留搜索和滚动状态，新增空格勾选与 Ctrl+S 保存。
+- `/model-prompts` 仅显示已启用的可用模型，使用与 `/allowed-models` 相同的有效 `enabledModels` 规则。
+- 禁用模型保留绑定和文件，重新启用后恢复；停用期间不注入其专属提示词。
+- Windows 安装脚本自动停用旧独立插件，避免命令重复注册。
+
+## 1.0.0
+
+- 两个独立插件的初始本地版本。
